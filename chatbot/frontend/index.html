@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job Postings Assistant</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <span class="logo">VDart</span>
+      <div class="header-titles">
+        <h1>Job Postings Assistant</h1>
+        <p class="sub">NextEra Energy · answers cite job IDs</p>
+      </div>
+      <span id="status" class="status" title="API status">…</span>
+    </div>
+  </header>
+
+  <main id="chat" aria-live="polite">
+    <div class="welcome">
+      <h2>What do you want to check?</h2>
+      <p class="welcome-sub">Live open jobs from NextEra Energy · answers cite Job IDs</p>
+      <div id="starter-grid" class="starter-grid" aria-label="Quick actions"></div>
+      <p id="starter-explore" class="starter-explore"></p>
+      <p class="welcome-note">
+        Or ask your own question below. Learned something on a call? Save it with
+        <em>/note &lt;job ID&gt; &lt;what you learned&gt;</em> (leave names/contacts
+        out). Source candidates with <em>/boolean &lt;job ID&gt;</em>.
+      </p>
+    </div>
+  </main>
+
+  <footer>
+    <form id="composer" autocomplete="off">
+      <input id="input" type="text" placeholder="Ask about open postings…" maxlength="2000" required>
+      <button id="send" type="submit" aria-label="Send">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M3.4 20.4l17.8-8.4L3.4 3.6l-.01 6.53L14 12 3.39 13.87z" fill="currentColor"/>
+        </svg>
+      </button>
+    </form>
+    <p class="note">Answers are generated from scraped posting data — verify details in Fieldglass before acting.</p>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

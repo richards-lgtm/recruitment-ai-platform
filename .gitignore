@@ -1,0 +1,37 @@
+# NOTE: .gitignore does not support inline (end-of-line) comments — every
+# comment must be on its own line, or the '#...' becomes part of the pattern.
+
+# === Secrets & scraped data — MUST never be committed (governance) ===
+.env
+.env.*
+# re-include the committed template (after the .env.* rule above)
+!.env.example
+# scraped JSON + downloaded attachments (unmasked NextEra data)
+output/
+
+# === Node / Playwright ===
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.cache/
+*.tsbuildinfo
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+*.log
+
+# === Requirement spec docs (binary; may hold client-confidential scope) ===
+# use `git add -f <file>.docx` to version one deliberately
+*.docx

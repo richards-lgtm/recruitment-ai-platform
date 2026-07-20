@@ -1,0 +1,37 @@
+# Chatbot deployment for VDHY045 (or any Docker host).
+# NOT YET TESTED — no Docker on the dev laptop; validate on the server.
+#
+#   docker compose up -d --build
+#
+# Expects a .env alongside this file with DATABASE_URL, LLM_API_KEY (or a
+# local LLM_BASE_URL), and CHATBOT_API_TOKEN set. Postgres itself is NOT in
+# this compose — on VDHY045 it runs natively per the infrastructure plan.
+services:
+  embed:
+    build:
+      context: .
+      dockerfile: chatbot/Dockerfile
+    command: python chatbot/api/embed_service.py
+    environment:
+      EMBED_HOST: 0.0.0.0
+    volumes:
+      - models:/models # persist the 2.2 GB BGE-M3 download across restarts
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: chatbot/Dockerfile
+    env_file: .env
+    environment:
+      CHATBOT_HOST: 0.0.0.0
+      CHATBOT_WORKERS: "4"
+      EMBED_SERVICE_URL: http://embed:8100
+    ports:
+      - "8000:8000"
+    depends_on:
+      - embed
+    restart: unless-stopped
+
+volumes:
+  models:

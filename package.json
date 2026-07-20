@@ -1,0 +1,24 @@
+{
+  "name": "recruitment-ai-poc-automation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Module 1 - Job Intake Automation (Fieldglass scrape -> Ceipal/board post)",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "scrape:fieldglass": "playwright test tests/fieldglass-scrape.spec.ts --headed",
+    "db:schema": "tsx db/apply-schema.ts",
+    "chunk:jobs": "tsx workers/chunk-jobs.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^26.1.1",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0"
+  }
+}
