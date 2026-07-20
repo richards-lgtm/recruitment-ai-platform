@@ -1,0 +1,66 @@
+name: Fieldglass scrape
+
+# Scrapes open Fieldglass postings and upserts them into the DB (incremental:
+# only NEW postings get detail-page visits; masking runs before insert).
+#
+# Runs every 30 minutes. NOTE on cost & cadence:
+#   - GitHub-hosted runner minutes are limited (~2,000/mo free on private repos).
+#     ~30 min cadence keeps this modest; */5 would cost ~$190/mo — don't.
+#   - Scheduled runs are best-effort (GitHub may delay them under load), so the
+#     interval is approximate, not exact.
+#   - The true every-5-min production design is a cron job on VDHY045 (in-network,
+#     free, reliable). This Action is the cloud/dev convenience path and writes to
+#     the Supabase dev DB (VDHY045's local Postgres isn't reachable from here).
+#
+# Governance: Fieldglass creds + DATABASE_URL live in GitHub repository Secrets
+# and the scrape runs on GitHub's cloud — same dev-only exception class as the
+# Supabase/Modal usage, pending manager sign-off. Masking (utils/maskJobs.ts)
+# runs before DB insert; the unmasked output/ JSON is NOT uploaded anywhere.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"      # every ~30 min (UTC); change to "0 * * * *" for hourly to stay within free minutes
+  workflow_dispatch: {}         # allow manual runs from the Actions tab
+
+# Never let two scrapes overlap; a queued run waits for the current one.
+concurrency:
+  group: fieldglass-scrape
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Scrape Fieldglass -> DB (headless, incremental)
+        env:
+          FIELDGLASS_HEADLESS: "1"
+          FIELDGLASS_URL: ${{ secrets.FIELDGLASS_URL }}
+          FIELDGLASS_USERNAME: ${{ secrets.FIELDGLASS_USERNAME }}
+          FIELDGLASS_PASSWORD: ${{ secrets.FIELDGLASS_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run scrape:ci
+
+      # Deliberately NO artifact upload: output/*.json is unmasked NextEra data
+      # and must not be stored on GitHub. Persistence is the (masked) DB upsert.
