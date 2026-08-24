@@ -52,7 +52,9 @@ permissions:
 jobs:
   scrape-one:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Covers the 3-minute retry wait, plus chunk+embed with a possible ~1 min
+    # cold start on the scale-to-zero embed service.
+    timeout-minutes: 25
     steps:
       # The job id arrives from outside the repo, so it is treated as untrusted:
       # read via env (never interpolated into a shell line, which would be a
@@ -123,6 +125,17 @@ jobs:
           # has not published it yet, and the 30-minute full scrape will collect
           # it. Failing here would cry wolf on a routine race.
           echo "::warning::$JOB_ID still not visible in Fieldglass after two attempts — leaving it to the scheduled full scrape (scrape.yml)"
+
+      # The whole point of the email trigger is speed, so chunk + embed here
+      # too: without this the posting would sit unsearchable until the next
+      # scheduled scrape, throwing away the minutes just gained. A no-op when
+      # the posting wasn't found (nothing new to chunk).
+      - name: Chunk and embed the new posting
+        uses: ./.github/actions/chunk-embed
+        with:
+          database-url: ${{ secrets.DATABASE_URL }}
+          embed-service-url: ${{ secrets.EMBED_SERVICE_URL }}
+          embed-service-token: ${{ secrets.EMBED_SERVICE_TOKEN }}
 
       # Same rule as scrape.yml: output/*.json is UNMASKED NextEra data and is
       # never uploaded. The masked DB upsert is the persistence path.
