@@ -1,0 +1,71 @@
+name: Chunk and embed
+description: >
+  Split newly scraped jobs into job_chunks and fill any NULL embeddings, so a
+  posting is searchable by the chatbot as soon as it is scraped.
+
+# Why this exists: chunking used to be a manual `npm run chunk:jobs` that
+# nobody ran. By 2026-08-24 that had silently drifted to 215 unembedded chunks
+# across 85 jobs — 33 of them OPEN postings that the chatbot, hybrid search and
+# /boolean simply could not see. Nothing failed; the data was just invisible.
+# Running it after every scrape makes that impossible to accumulate again.
+#
+# Shared by scrape.yml and requisition-trigger.yml so the two can't diverge.
+
+inputs:
+  database-url:
+    description: Postgres connection string (Supabase dev DB).
+    required: true
+  embed-service-url:
+    description: >
+      Remote BGE-M3 endpoint (Modal bge-embed). When empty, embedding is
+      SKIPPED with a warning rather than attempted locally.
+    required: false
+    default: ""
+  embed-service-token:
+    description: Bearer token for the embed service.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    # Deliberately NOT workers/requirements.txt. That pins FlagEmbedding, which
+    # drags in torch (gigabytes, minutes of install) and is only needed for
+    # LOCAL embedding. embed_worker.py imports it lazily inside
+    # load_local_model(), so with EMBED_SERVICE_URL set the RemoteEmbedder path
+    # needs nothing heavier than httpx.
+    - name: Install embed-worker dependencies
+      shell: bash
+      run: pip install --quiet "psycopg[binary]>=3.2" "python-dotenv>=1.0" httpx
+
+    # Idempotent: only jobs without chunks are processed, and recruiter-note
+    # chunks are excluded from rebuild queries so notes survive.
+    - name: Chunk new jobs
+      shell: bash
+      env:
+        DATABASE_URL: ${{ inputs.database-url }}
+      run: npm run chunk:jobs
+
+    - name: Embed pending chunks
+      shell: bash
+      env:
+        DATABASE_URL: ${{ inputs.database-url }}
+        EMBED_SERVICE_URL: ${{ inputs.embed-service-url }}
+        EMBED_SERVICE_TOKEN: ${{ inputs.embed-service-token }}
+      run: |
+        if [ -z "$EMBED_SERVICE_URL" ]; then
+          echo "::warning::EMBED_SERVICE_URL secret is not set — chunks are queued with NULL embeddings and stay invisible to search. Add EMBED_SERVICE_URL and EMBED_SERVICE_TOKEN as repository secrets."
+          exit 0
+        fi
+
+        # A failure here must not fail the workflow: the scrape's data is
+        # already committed, and job_chunks IS the work queue — anything left
+        # with a NULL embedding is simply picked up by the next run. Failing
+        # red would misreport a healthy scrape as broken.
+        if ! python workers/embed_worker.py; then
+          echo "::warning::Embedding pass failed (service cold-start or outage?) — chunks remain queued and the next run will retry them."
+        fi

@@ -76,6 +76,19 @@ Module 1 section). Don't start other Module 2/3/4 work without an explicit nod.
   cross-posting compliance boilerplate deliberately excluded) with NULL embeddings
   as the work queue; `py workers/embed_worker.py` (BGE-M3, local) fills them.
   `npm run db:schema` re-applies `db/schema.sql` idempotently after schema edits.
+  **Automated in CI since 2026-08-24**: both steps run after every scrape via
+  the composite action `.github/actions/chunk-embed`, shared by `scrape.yml`
+  and `requisition-trigger.yml`. As a manual step it had silently drifted to
+  215 unembedded chunks across 85 jobs — 33 of them OPEN and therefore
+  invisible to the chatbot/hybrid search/`/boolean` while looking perfectly
+  healthy. The action installs only `psycopg`/`dotenv`/`httpx` (NOT
+  `workers/requirements.txt` — FlagEmbedding drags in torch; `embed_worker`
+  imports it lazily so the RemoteEmbedder path doesn't need it), and needs
+  `EMBED_SERVICE_URL`/`EMBED_SERVICE_TOKEN` repo secrets. Without them, or on
+  an embed failure, it warns and leaves chunks queued rather than failing the
+  run — `job_chunks` IS the work queue, so the next pass retries. Idle runs
+  cost nothing: with no NULL embeddings the worker returns without contacting
+  the (scale-to-zero) GPU service.
 - **Hybrid search** (built 2026-07-15): `py workers/hybrid_search.py "query"` fuses
   GIN full-text (`websearch_to_tsquery`, AND semantics) and HNSW cosine retrieval
   with Reciprocal Rank Fusion (k=60), aggregates per job, filters `is_open`.
