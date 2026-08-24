@@ -79,13 +79,23 @@ trigger rather than stacking duplicates.
 | Step | How | Expect |
 | --- | --- | --- |
 | Gmail search matches | Run `dryRun()` | Logs recent requisition threads and the ids parsed from them |
-| GitHub accepts dispatches | Run `testDispatch()` | `Dispatch accepted (204)` and a new run in the Actions tab |
+| GitHub accepts dispatches | Run `testDispatch()` | `Dispatch accepted (204) for NEEJP…` and a new run in the Actions tab |
 | Scrape works end to end | Watch that run | `✓ NEEJP… scraped and upserted` |
 | Real mail fires it | Wait for the next requisition | Thread gains the `fieldglass-dispatched` label; a run appears within ~1 min |
+
+`testDispatch()` resolves the job id at run time — the `TEST_JOB_ID` script
+property if you set one, otherwise the newest requisition id in the mailbox
+(handled threads included). Nothing to edit before running it, and no pinned id
+to rot once that posting closes.
 
 You can also trigger a run by hand from Actions → *Requisition email trigger* →
 Run workflow, entering a job id — useful for testing the GitHub half before the
 Gmail half exists.
+
+**Editing the script later:** the copy in this repo is the version-controlled
+source, but it is NOT linked to the live Apps Script project. After changing
+`requisition-dispatch.gs` here, re-paste it into the editor at
+script.google.com or the running trigger keeps the old code.
 
 ## How it stays idempotent
 

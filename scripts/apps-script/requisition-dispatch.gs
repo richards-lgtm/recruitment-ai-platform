@@ -154,13 +154,48 @@ function setup() {
 }
 
 /**
+ * Newest requisition id in the mailbox, ignoring the dispatched label — i.e.
+ * the most recent id regardless of whether it has already been handled.
+ * Used only by testDispatch(); the real flow never looks at handled threads.
+ */
+function newestRequisitionId() {
+  var threads = GmailApp.search(SEARCH_QUERY.replace('-label:' + DONE_LABEL, ''), 0, 5);
+  for (var i = 0; i < threads.length; i++) {
+    var id = extractJobId(threads[i].getFirstMessageSubject());
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
  * Fire one dispatch by hand to prove the GitHub side works, without waiting for
- * a real requisition email. Edit the id, run, then watch the Actions tab.
+ * a new requisition email. Run it, then watch the Actions tab.
+ *
+ * The id is resolved at run time rather than hardcoded: a pinned id silently
+ * rots once that posting closes, and the run then reports "not in the
+ * work-items list" — which reads as a broken pipeline when the pipeline is
+ * fine. Precedence: TEST_JOB_ID script property, else the newest requisition
+ * id in the mailbox.
  */
 function testDispatch() {
-  var token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
-  var ok = dispatch(token, 'NEEJP00020528');
-  Logger.log(ok ? 'Dispatch accepted (204)' : 'Dispatch failed — see the log above');
+  var props = PropertiesService.getScriptProperties();
+  var jobId = props.getProperty('TEST_JOB_ID') || newestRequisitionId();
+
+  if (!jobId) {
+    Logger.log(
+      'No id to test with: no TEST_JOB_ID script property, and no requisition ' +
+        'email matched SEARCH_QUERY. Run dryRun() to check the search, or set ' +
+        'TEST_JOB_ID to a currently-open posting.'
+    );
+    return;
+  }
+
+  var ok = dispatch(props.getProperty('GITHUB_TOKEN'), jobId);
+  Logger.log(
+    ok
+      ? 'Dispatch accepted (204) for ' + jobId
+      : 'Dispatch failed for ' + jobId + ' — see the log above'
+  );
 }
 
 /**
