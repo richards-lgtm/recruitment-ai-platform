@@ -9,6 +9,7 @@
  */
 import { Pool } from 'pg';
 import { maskJobs, MaskStats } from './maskJobs';
+import { deriveJobFields, DERIVED_COLUMNS } from './jobFields';
 
 /** Curated fields shared with the scrape spec's JobPosting (structural match). */
 export interface StorableJob {
@@ -53,6 +54,21 @@ export async function fetchKnownJobIds(db: Pool): Promise<Set<string>> {
   return new Set(res.rows.map((r: { job_id: string }) => r.job_id));
 }
 
+/** Columns written on every upsert: the original curated set, then the
+ *  Retain/Discuss fields promoted out of `details` by utils/jobFields.ts. */
+const BASE_COLUMNS = [
+  'job_id', 'title', 'client', 'site', 'location', 'category', 'labor_type',
+  'positions', 'hours_per_week', 'rate', 'received_date', 'create_date',
+  'respond_by_date', 'description', 'detail_url', 'details', 'attachments',
+];
+const UPSERT_COLUMNS = [...BASE_COLUMNS, ...DERIVED_COLUMNS];
+// Everything except the primary key is refreshed on conflict.
+const UPSERT_SQL = `insert into jobs (${UPSERT_COLUMNS.join(', ')})
+   values (${UPSERT_COLUMNS.map((_, i) => `$${i + 1}`).join(',')})
+   on conflict (job_id) do update set
+     ${UPSERT_COLUMNS.slice(1).map((c) => `${c} = excluded.${c}`).join(',\n     ')},
+     last_seen_at = now(), is_open = true`;
+
 /** Insert new jobs / refresh existing ones. Masks PII before anything is sent. */
 export async function upsertJobs(
   db: Pool,
@@ -60,29 +76,16 @@ export async function upsertJobs(
 ): Promise<MaskStats> {
   const { jobs: masked, stats } = maskJobs(jobs);
   for (const job of masked) {
-    await db.query(
-      `insert into jobs (
-         job_id, title, client, site, location, category, labor_type,
-         positions, hours_per_week, rate, received_date, create_date,
-         respond_by_date, description, detail_url, details, attachments
-       ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-       on conflict (job_id) do update set
-         title = excluded.title, client = excluded.client, site = excluded.site,
-         location = excluded.location, category = excluded.category,
-         labor_type = excluded.labor_type, positions = excluded.positions,
-         hours_per_week = excluded.hours_per_week, rate = excluded.rate,
-         received_date = excluded.received_date, create_date = excluded.create_date,
-         respond_by_date = excluded.respond_by_date, description = excluded.description,
-         detail_url = excluded.detail_url, details = excluded.details,
-         attachments = excluded.attachments,
-         last_seen_at = now(), is_open = true`,
-      [
-        job.jobId, job.title, job.client, job.site, job.location, job.category,
-        job.laborType, job.positions, job.hoursPerWeek, job.rate,
-        job.receivedDate, job.createDate, job.respondByDate, job.description,
-        job.detailUrl, JSON.stringify(job.details), JSON.stringify(job.attachments),
-      ],
-    );
+    // Derived AFTER masking, so a promoted column can't carry PII that the
+    // jsonb blob had redacted.
+    const derived = deriveJobFields(job.details);
+    await db.query(UPSERT_SQL, [
+      job.jobId, job.title, job.client, job.site, job.location, job.category,
+      job.laborType, job.positions, job.hoursPerWeek, job.rate,
+      job.receivedDate, job.createDate, job.respondByDate, job.description,
+      job.detailUrl, JSON.stringify(job.details), JSON.stringify(job.attachments),
+      ...DERIVED_COLUMNS.map((c) => derived[c]),
+    ]);
   }
   return stats;
 }

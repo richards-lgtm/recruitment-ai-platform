@@ -46,6 +46,26 @@ Module 1 section). Don't start other Module 2/3/4 work without an explicit nod.
     scrape**: the spec diffs the work-items list against stored jobIds and visits
     detail pages only for new postings; known postings get `last_seen_at` bumped;
     stored postings missing from the list get `is_open=false`.
+  - **Field review applied (2026-08-04)**: per `Jobfield_Field glass.docx` and
+    the user's decision to retain broadly for now, **both Retain and Discuss
+    fields are curated columns** — 12 were promoted out of `details` jsonb on
+    2026-08-04 (`job_code`, `shift_type`, `max_submissions`, `total_hours`,
+    `driving_required`, `additional_details`, `submit_date`, `business_unit`,
+    `travel_time_pct`, `skills_based_hiring`, `nuclear_badge_required`,
+    `nerc_cip_required`). `utils/jobFields.ts` owns the label→column mapping
+    (exact label first, then a regex fallback because the compliance fields'
+    label IS the full Fieldglass question text — rewording it would otherwise
+    silently null the column); dates stay `text` but counts/percentages/flags
+    are `int`/`numeric`/`boolean`, and a missing/unrecognised value is NULL,
+    never 0/false. Derivation happens INSIDE `upsertJobs` **after** masking, so
+    a promoted column can't carry PII the jsonb had redacted. Discard-marked
+    fields stay in `details` only (except `detail_url`, kept because the
+    incremental scraper needs it) and can be promoted later with an `alter` +
+    `npm run db:backfill-fields` — no re-scrape. The 102 stored rows were
+    backfilled from their own `details` blobs (0 numeric mismatches on a
+    round-trip check; embeddings untouched — chunk text doesn't change).
+    Field-by-field validation record: `docs/fieldglass-field-mapping.md`.
+    Unit tests: `tests/job-fields.spec.ts` (pure, no DB/browser).
   - **PII masking** (`utils/maskJobs.ts`) runs inside `upsertJobs` — person names
     (harvested at runtime from Coordinator/Distributor fields, then scrubbed from
     all text), emails, and US phone numbers never reach the database. Known gap:
@@ -372,6 +392,31 @@ Module 1 section). Don't start other Module 2/3/4 work without an explicit nod.
   unreachable, generic) — raw provider errors (org ids, quotas) are logged
   server-side only, never sent to the browser; verified against a real
   exhausted-quota 429 on both /api/chat and the SSE stream.
+- **Email-triggered scraping** (built 2026-08-24): a requisition email scrapes
+  that one posting within ~1 min instead of waiting for the next scheduled pass.
+  Two homes for the trigger, same downstream path:
+  - **Local/server**: `scripts/watch-requisition-email.ts` (IMAP IDLE,
+    sub-second, credentials stay in-network) — the production answer once it
+    runs as a service on VDHY045.
+  - **Cloud**: Gmail → **Google Apps Script** (1-min time trigger, free) →
+    `repository_dispatch` → `.github/workflows/requisition-trigger.yml` →
+    `npm run watch:email -- --job=<id>`. Actions **cannot** listen for email, so
+    something must poll or push; pushing from Apps Script means runner minutes
+    are only spent on real requisitions (~900/mo vs ~8,600/mo for a `*/5` poll).
+    Script source: `scripts/apps-script/requisition-dispatch.gs`; setup +
+    troubleshooting: `docs/email-trigger-setup.md`.
+    Key facts: `repository_dispatch` only runs the workflow as it exists on the
+    **default branch** (dispatching against a feature branch silently does
+    nothing); the `fieldglass-dispatched` Gmail label IS the dedupe state (no
+    watermark file, which is what makes it work on ephemeral runners); the job
+    id is untrusted input so it's read via `env:` and regex-validated before
+    reaching Playwright (never interpolated into a `run:` line); the workflow
+    shares `scrape.yml`'s concurrency group so two Fieldglass sessions never
+    overlap — with the trade-off that a burst leaves some postings to the
+    30-min full scrape. No Gmail credentials reach GitHub.
+    The email routinely beats the portal, so the workflow tries, waits 3 min,
+    tries once more, then warns and defers to the scheduled scrape rather than
+    failing red.
 - Later steps in this module (not started): auto-post jobs to Ceipal + free job boards,
   conditional Dice posting, notification email to recruiters, TAT timer.
 - Fieldglass has an API but we have **no API access** — UI scraping is the agreed approach.
@@ -390,9 +435,12 @@ Module 1 section). Don't start other Module 2/3/4 work without an explicit nod.
 playwright.config.ts      # @playwright/test config — headed by default, trace/screenshot on failure
 tests/
   fieldglass-scrape.spec.ts   # login + scrape spec; selectors confirmed against live portal 2026-07-09
+  job-fields.spec.ts          # unit tests for utils/jobFields.ts (pure — no DB, no browser)
 utils/
   writeJson.ts            # writes scraped jobs to output/fieldglass-jobs-<timestamp>.json
   maskJobs.ts             # PII masking (names/emails/phones) — pure functions, no network
+  jobFields.ts            # detail-page label -> curated column mapping for the Retain/Discuss
+                          # fields (field review 2026-08-04); used by db.ts AND the backfill
   db.ts                   # pg upsert + incremental-diff helpers; masks via maskJobs before insert
   chunkJobs.ts            # splits a stored job into embeddable text chunks
 workers/
@@ -423,6 +471,18 @@ docker-compose.yml        # embed + api(4 workers) for VDHY045 — UNTESTED; Pos
 db/
   schema.sql              # Postgres + pgvector schema (jobs + job_chunks); applied via npm run db:schema
   apply-schema.ts         # idempotent schema applier against DATABASE_URL
+  backfill-fields.ts      # re-runnable backfill of the 2026-08-04 promoted columns from `details`
+                          # (npm run db:backfill-fields [-- --dry-run]); reports per-column fill counts
+scripts/
+  watch-requisition-email.ts   # Gmail IMAP watcher -> targeted scrape (also `--job=<id>`, no mailbox)
+  apps-script/requisition-dispatch.gs  # runs on Google, not here: Gmail -> repository_dispatch
+.github/workflows/
+  scrape.yml               # scheduled full scrape (every ~30 min)
+  requisition-trigger.yml  # on: repository_dispatch — scrapes ONE posting from an email trigger
+docs/
+  fieldglass-field-mapping.md  # field review -> data model validation record (Retain/Discuss/Discard)
+  email-trigger-setup.md       # Gmail -> Apps Script -> Actions wiring, verification, troubleshooting
+  ceipal-data-model.md         # Ceipal API field reference
 .env                      # local DB connection details (gitignored); .env.example is the template
                           # (.env is loaded by playwright.config.ts via dotenv)
 output/                   # scraped JSON output (gitignored)

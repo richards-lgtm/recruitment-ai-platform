@@ -9,7 +9,11 @@
     "scrape:fieldglass": "playwright test tests/fieldglass-scrape.spec.ts --headed",
     "scrape:ci": "playwright test tests/fieldglass-scrape.spec.ts",
     "db:schema": "tsx db/apply-schema.ts",
-    "chunk:jobs": "tsx workers/chunk-jobs.ts"
+    "db:backfill-fields": "tsx db/backfill-fields.ts",
+    "chunk:jobs": "tsx workers/chunk-jobs.ts",
+    "ceipal:capture": "tsx scripts/ceipal-capture-session.ts",
+    "watch:email": "tsx scripts/watch-requisition-email.ts",
+    "watch:email:once": "tsx scripts/watch-requisition-email.ts --once"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
@@ -20,6 +24,7 @@
   },
   "dependencies": {
     "dotenv": "^17.4.2",
+    "imapflow": "^1.6.5",
     "pg": "^8.22.0"
   }
 }

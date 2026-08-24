@@ -8,6 +8,8 @@
 !.env.example
 # scraped JSON + downloaded attachments (unmasked NextEra data)
 output/
+# captured browser sessions (Ceipal SSO storageState) — auth material, never commit
+.auth/
 
 # === Node / Playwright ===
 node_modules/
