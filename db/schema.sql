@@ -30,6 +30,27 @@ create table if not exists jobs (
   details         jsonb,
   attachments     jsonb,        -- array of {name, path} from output/attachments/<jobId>/
 
+  -- Fields promoted to columns per the field review (`Jobfield_Field glass.docx`,
+  -- decision 2026-08-04: keep BOTH Retain and Discuss rather than risk dropping
+  -- something useful; revisit once requirements settle). Values are derived from
+  -- `details` by utils/jobFields.ts, so the raw label/value string always stays
+  -- in the jsonb blob as the audit trail. Discard-marked fields are NOT promoted.
+  -- Typing rule: dates stay text (see the date note above — Fieldglass mixes
+  -- granularity); counts/percentages/flags become real types because their
+  -- format is uniform across every posting scraped so far.
+  job_code             text,      -- Retain: duplicate-title guard
+  shift_type           text,      -- Retain: candidate availability matching
+  max_submissions      int,       -- Retain: submissions allowed per supplier
+  total_hours          numeric,   -- Retain: "2,088.00" -> part-time/full-time signal
+  driving_required     boolean,   -- Retain: hard filter (custom question, Y/N)
+  additional_details   text,      -- Retain: buyer free text, often the real JD
+  submit_date          text,      -- Discuss: Fieldglass workflow timestamp
+  business_unit        text,      -- Discuss: internal reporting/segmentation
+  travel_time_pct      numeric,   -- Discuss: "0.000 %" -> 0
+  skills_based_hiring  boolean,   -- Discuss: may change screening
+  nuclear_badge_required boolean, -- Discuss: NextEra nuclear hard filter
+  nerc_cip_required    boolean,   -- Discuss: NERC CIP access hard filter
+
   -- scrape bookkeeping — drives the incremental diff (new jobId => visit detail
   -- page; known jobId => just bump last_seen_at) and closure detection
   -- (is_open flips false when a jobId stops appearing in the work-items list)
@@ -37,6 +58,23 @@ create table if not exists jobs (
   last_seen_at    timestamptz not null default now(),
   is_open         boolean     not null default true
 );
+
+-- Databases created before 2026-08-04 already have `jobs`, so `create table if
+-- not exists` above is a no-op for them — add the promoted columns explicitly.
+-- Idempotent, and safe to leave here permanently (no-op on a fresh database).
+alter table jobs
+  add column if not exists job_code               text,
+  add column if not exists shift_type             text,
+  add column if not exists max_submissions        int,
+  add column if not exists total_hours            numeric,
+  add column if not exists driving_required       boolean,
+  add column if not exists additional_details     text,
+  add column if not exists submit_date            text,
+  add column if not exists business_unit          text,
+  add column if not exists travel_time_pct        numeric,
+  add column if not exists skills_based_hiring    boolean,
+  add column if not exists nuclear_badge_required boolean,
+  add column if not exists nerc_cip_required      boolean;
 
 create index if not exists jobs_is_open_idx  on jobs (is_open);
 create index if not exists jobs_details_idx  on jobs using gin (details);
