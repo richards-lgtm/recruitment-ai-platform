@@ -10,6 +10,14 @@ const FIELDGLASS_USERNAME = process.env.FIELDGLASS_USERNAME;
 const FIELDGLASS_PASSWORD = process.env.FIELDGLASS_PASSWORD;
 // Optional cap for quick smoke runs, e.g. FIELDGLASS_MAX_JOBS=3. Unset = scrape all.
 const MAX_JOBS = Number(process.env.FIELDGLASS_MAX_JOBS) || Infinity;
+// Optional targeted mode, e.g. FIELDGLASS_JOB_IDS=NEEJP00020528[,NEEJP00020529]:
+// scrape ONLY those postings and bypass the incremental diff. Set by the Gmail
+// requisition watcher (scripts/watch-requisition-email.ts) so a "New requisition"
+// email scrapes its one job immediately instead of waiting for the next cron pass.
+const TARGET_JOB_IDS = (process.env.FIELDGLASS_JOB_IDS ?? '')
+  .split(/[,\s]+/)
+  .map((id) => id.trim().toUpperCase())
+  .filter(Boolean);
 
 interface JobPosting {
   jobId: string;
@@ -237,9 +245,28 @@ test('scrape open job postings from Fieldglass', async ({ page }) => {
   let knownIds = new Set<string>();
   if (db) {
     knownIds = await fetchKnownJobIds(db);
-    console.log(`DB: ${knownIds.size} jobs already stored — scraping new postings only.`);
+    console.log(`DB: ${knownIds.size} jobs already stored.`);
   }
-  const newListings = db ? listings.filter((l) => !knownIds.has(l.jobId)) : listings;
+
+  let newListings: typeof listings;
+  if (TARGET_JOB_IDS.length > 0) {
+    // Targeted run: take exactly what was asked for, even if already stored —
+    // the caller wants these postings scraped/refreshed now.
+    const present = new Set(listings.map((l) => l.jobId.toUpperCase()));
+    newListings = listings.filter((l) => TARGET_JOB_IDS.includes(l.jobId.toUpperCase()));
+    for (const id of TARGET_JOB_IDS) {
+      // The requisition email can arrive before the posting shows up in the
+      // work-items list. Emit a machine-readable marker (instead of failing) so
+      // the watcher can retry later — a missing target is a race, not a bug.
+      if (!present.has(id)) console.log(`TARGET_NOT_FOUND: ${id}`);
+    }
+    console.log(
+      `Targeted scrape: ${newListings.length}/${TARGET_JOB_IDS.length} requested posting(s) found in the list.`,
+    );
+  } else {
+    newListings = db ? listings.filter((l) => !knownIds.has(l.jobId)) : listings;
+    if (db) console.log(`Scraping new postings only: ${newListings.length} to visit.`);
+  }
 
   // --- Visit each posting's detail page for rate, description, dates, location ---
   const toScrape = newListings.slice(0, Math.min(newListings.length, MAX_JOBS));
@@ -303,8 +330,16 @@ test('scrape open job postings from Fieldglass', async ({ page }) => {
         // Known postings still listed: bump last_seen_at. Stored postings that
         // vanished from the list: mark closed.
         await touchSeen(db, listings.filter((l) => knownIds.has(l.jobId)).map((l) => l.jobId));
-        const closed = await markMissingClosed(db, listings.map((l) => l.jobId));
-        if (closed > 0) console.log(`DB: marked ${closed} job(s) closed (gone from work-items list).`);
+        if (TARGET_JOB_IDS.length > 0) {
+          // Deliberately NOT closing anything on a targeted run: an email-triggered
+          // single-job scrape shouldn't have the authority to close 50 postings if
+          // the portal happened to render a filtered/partial list. Closure stays a
+          // side effect of the full scheduled scrape.
+          console.log('DB: skipping closed-job detection (targeted run).');
+        } else {
+          const closed = await markMissingClosed(db, listings.map((l) => l.jobId));
+          if (closed > 0) console.log(`DB: marked ${closed} job(s) closed (gone from work-items list).`);
+        }
       } catch (err) {
         console.error(`DB persistence failed (JSON output above is intact): ${(err as Error).message}`);
         throw err;

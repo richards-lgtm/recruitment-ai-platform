@@ -1,0 +1,128 @@
+name: Requisition email trigger
+
+# Event-driven counterpart to scrape.yml: instead of waiting up to 30 minutes
+# for the next scheduled pass, a "New requisition from NextEra Energy submitted
+# [... Requisition ID: NEEJP00020528 ...]" email scrapes that ONE posting within
+# about a minute.
+#
+# GitHub Actions cannot listen for email, so the push comes from outside:
+#   Gmail -> Apps Script (time trigger, 1 min, runs free on Google's infra)
+#         -> POST /repos/:owner/:repo/dispatches {event_type: new-requisition}
+#         -> this workflow -> targeted Playwright scrape -> masked upsert
+# Source + setup for the Apps Script side: scripts/apps-script/ and
+# docs/email-trigger-setup.md.
+#
+# Why this shape: polling Gmail from a scheduled workflow would cost ~8,600
+# runner minutes/month (~$50+) because it runs whether or not mail arrived.
+# Here minutes are only spent when a requisition actually lands.
+#
+# NOTE: repository_dispatch only ever runs the workflow file as it exists on the
+# DEFAULT branch. This file has to be on main before any dispatch will fire —
+# testing it from a feature branch silently does nothing.
+#
+# Governance: no Gmail credentials live here. The mailbox is only ever touched
+# by Apps Script under the mailbox owner's own Google account, and the only
+# thing crossing into GitHub is a job id. Fieldglass creds + DATABASE_URL come
+# from repository Secrets, exactly as in scrape.yml, and masking still runs
+# before any DB insert.
+
+on:
+  repository_dispatch:
+    types: [new-requisition]
+  # Manual escape hatch: run one posting straight from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Fieldglass job id, e.g. NEEJP00020528"
+        required: true
+        type: string
+
+# Share scrape.yml's group so a targeted run and the 30-minute full scrape never
+# hold two Fieldglass sessions open at once. Consequence to be aware of: if a
+# burst of requisitions arrives, GitHub keeps only ONE run queued per group and
+# drops the rest — those postings simply wait for the next scheduled full scrape,
+# which is the backstop this whole design leans on.
+concurrency:
+  group: fieldglass-scrape
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scrape-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # The job id arrives from outside the repo, so it is treated as untrusted:
+      # read via env (never interpolated into a shell line, which would be a
+      # script-injection hole) and checked against the Fieldglass id shape before
+      # it reaches Playwright.
+      - name: Validate job id
+        id: check
+        env:
+          RAW_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+        run: |
+          if [[ ! "$RAW_ID" =~ ^[A-Za-z0-9_-]{3,40}$ ]]; then
+            echo "::error::Rejected job id: '$RAW_ID' (expected 3-40 chars of A-Z, 0-9, _ or -)"
+            exit 1
+          fi
+          echo "job_id=${RAW_ID^^}" >> "$GITHUB_OUTPUT"
+          echo "Triggered for ${RAW_ID^^}"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # `--job=<id>` drives the existing watcher's queue/retry logic with no
+      # mailbox involved, so this step needs no Gmail credentials. It exits
+      # non-zero when the posting is not in the work-items list yet.
+      #
+      # That happens routinely: the notification email regularly beats the
+      # Fieldglass UI by a few minutes. The local watcher rides a 3/7/15/30/60
+      # minute ladder, but idling a runner through that would burn paid minutes,
+      # so this makes one delayed retry and then defers to the scheduled scrape.
+      - name: Scrape the new posting (with one delayed retry)
+        env:
+          JOB_ID: ${{ steps.check.outputs.job_id }}
+          FIELDGLASS_HEADLESS: "1"
+          GMAIL_SCRAPE_HEADLESS: "1"
+          FIELDGLASS_URL: ${{ secrets.FIELDGLASS_URL }}
+          FIELDGLASS_USERNAME: ${{ secrets.FIELDGLASS_USERNAME }}
+          FIELDGLASS_PASSWORD: ${{ secrets.FIELDGLASS_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if npm run watch:email -- --job="$JOB_ID"; then
+            echo "✓ $JOB_ID scraped and upserted"
+            exit 0
+          fi
+
+          echo "::notice::$JOB_ID not in the work-items list yet — retrying in 3 minutes"
+          sleep 180
+
+          if npm run watch:email -- --job="$JOB_ID"; then
+            echo "✓ $JOB_ID scraped and upserted on the second attempt"
+            exit 0
+          fi
+
+          # Not a failure worth a red X: the posting is real, Fieldglass just
+          # has not published it yet, and the 30-minute full scrape will collect
+          # it. Failing here would cry wolf on a routine race.
+          echo "::warning::$JOB_ID still not visible in Fieldglass after two attempts — leaving it to the scheduled full scrape (scrape.yml)"
+
+      # Same rule as scrape.yml: output/*.json is UNMASKED NextEra data and is
+      # never uploaded. The masked DB upsert is the persistence path.
