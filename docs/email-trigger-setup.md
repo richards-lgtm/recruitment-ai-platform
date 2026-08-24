@@ -115,10 +115,15 @@ before it reaches Playwright.
   minutes, tries again, then emits a warning and leaves it to the 30-minute
   scheduled scrape. That's a routine race, not a failure — hence a warning
   rather than a red build.
-- **Bursts can drop dispatches.** The workflow shares `scrape.yml`'s
+- **Clusters are batched into one run.** The workflow shares `scrape.yml`'s
   concurrency group so two Fieldglass sessions never run at once, and GitHub
-  keeps only one run queued per group. Several requisitions landing together
-  means some wait for the scheduled scrape instead.
+  keeps only one run queued per group — so N simultaneous dispatches would see
+  most of them cancelled. Apps Script therefore sends **one** dispatch per tick
+  carrying every id it found (`"NEEJP1,NEEJP2,NEEJP3"`), and the scrape spec
+  visits them all in a single browser session. Up to 10 threads per tick
+  (`MAX_THREADS_PER_RUN`), and the workflow refuses a payload of more than 25
+  ids as a runaway guard. A bigger backlog simply drains over successive
+  ticks — the label keeps track, so nothing is lost.
 - **Apps Script quotas** are generous but real: `UrlFetchApp` is capped around
   20k calls/day on a consumer account, and Google may skip trigger ticks under
   load. Neither binds at this volume.
