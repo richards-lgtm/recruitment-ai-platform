@@ -56,21 +56,48 @@ jobs:
     # cold start on the scale-to-zero embed service.
     timeout-minutes: 25
     steps:
-      # The job id arrives from outside the repo, so it is treated as untrusted:
+      # The payload arrives from outside the repo, so it is treated as untrusted:
       # read via env (never interpolated into a shell line, which would be a
-      # script-injection hole) and checked against the Fieldglass id shape before
-      # it reaches Playwright.
-      - name: Validate job id
+      # script-injection hole) and every id checked against the Fieldglass id
+      # shape before any of it reaches Playwright.
+      #
+      # Accepts one id or a comma-separated list: Apps Script batches a cluster
+      # of requisition emails into a single dispatch so the concurrency group
+      # can't cancel the surplus runs.
+      - name: Validate job id(s)
         id: check
         env:
-          RAW_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+          RAW_IDS: ${{ github.event.client_payload.job_id || inputs.job_id }}
         run: |
-          if [[ ! "$RAW_ID" =~ ^[A-Za-z0-9_-]{3,40}$ ]]; then
-            echo "::error::Rejected job id: '$RAW_ID' (expected 3-40 chars of A-Z, 0-9, _ or -)"
+          CLEAN=""
+          COUNT=0
+          IFS=',' read -ra PARTS <<< "$RAW_IDS"
+          for raw in "${PARTS[@]}"; do
+            id="$(echo "$raw" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+            [ -z "$id" ] && continue
+            if [[ ! "$id" =~ ^[A-Z0-9_-]{3,40}$ ]]; then
+              echo "::error::Rejected job id: '$raw' (expected 3-40 chars of A-Z, 0-9, _ or -)"
+              exit 1
+            fi
+            # Skip duplicates — the same requisition can be emailed twice.
+            case ",$CLEAN," in *",$id,"*) continue ;; esac
+            CLEAN="${CLEAN:+$CLEAN,}$id"
+            COUNT=$((COUNT + 1))
+          done
+
+          if [ -z "$CLEAN" ]; then
+            echo "::error::No usable job id in payload: '$RAW_IDS'"
             exit 1
           fi
-          echo "job_id=${RAW_ID^^}" >> "$GITHUB_OUTPUT"
-          echo "Triggered for ${RAW_ID^^}"
+          # Mirrors MAX_THREADS_PER_RUN in the Apps Script. A payload far larger
+          # than a plausible mail cluster means something is wrong upstream.
+          if [ "$COUNT" -gt 25 ]; then
+            echo "::error::$COUNT job ids in one dispatch (max 25) — refusing"
+            exit 1
+          fi
+
+          echo "job_ids=$CLEAN" >> "$GITHUB_OUTPUT"
+          echo "Triggered for $COUNT posting(s): $CLEAN"
 
       - uses: actions/checkout@v4
 
@@ -90,47 +117,84 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      # `--job=<id>` drives the existing watcher's queue/retry logic with no
-      # mailbox involved, so this step needs no Gmail credentials. It exits
-      # non-zero when the posting is not in the work-items list yet.
+      # Drives the scrape spec's targeted mode directly (FIELDGLASS_JOB_IDS),
+      # which visits every requested posting in ONE browser session — so a
+      # cluster costs one login, not one per posting. No Gmail credentials are
+      # needed here.
       #
-      # That happens routinely: the notification email regularly beats the
-      # Fieldglass UI by a few minutes. The local watcher rides a 3/7/15/30/60
-      # minute ladder, but idling a runner through that would burn paid minutes,
-      # so this makes one delayed retry and then defers to the scheduled scrape.
-      - name: Scrape the new posting (with one delayed retry)
+      # The spec prints `TARGET_NOT_FOUND: <id>` for postings missing from the
+      # work-items list, which happens routinely: the notification email
+      # regularly beats the Fieldglass UI by a few minutes. The local watcher
+      # rides a 3/7/15/30/60 minute ladder, but idling a runner through that
+      # would burn paid minutes, so this retries ONLY the missing ids once and
+      # then defers the stragglers to the scheduled scrape.
+      - name: Scrape the new posting(s) (with one delayed retry)
         env:
-          JOB_ID: ${{ steps.check.outputs.job_id }}
+          JOB_IDS: ${{ steps.check.outputs.job_ids }}
           FIELDGLASS_HEADLESS: "1"
-          GMAIL_SCRAPE_HEADLESS: "1"
           FIELDGLASS_URL: ${{ secrets.FIELDGLASS_URL }}
           FIELDGLASS_USERNAME: ${{ secrets.FIELDGLASS_USERNAME }}
           FIELDGLASS_PASSWORD: ${{ secrets.FIELDGLASS_PASSWORD }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          if npm run watch:email -- --job="$JOB_ID"; then
-            echo "✓ $JOB_ID scraped and upserted"
+          LOG=/tmp/scrape.log
+
+          scrape() {
+            echo "→ scraping: $1"
+            FIELDGLASS_JOB_IDS="$1" \
+              npx playwright test tests/fieldglass-scrape.spec.ts --reporter=list 2>&1 | tee "$LOG"
+            return "${PIPESTATUS[0]}"
+          }
+
+          # Ids the spec reported as absent from the work-items list. grep
+          # finding nothing is not an error here — it means everything landed.
+          missing() {
+            grep -oE 'TARGET_NOT_FOUND: [A-Za-z0-9_-]+' "$LOG" \
+              | awk '{print $2}' | sort -u | paste -sd, - || true
+          }
+
+          rc=0; scrape "$JOB_IDS" || rc=$?
+          MISS="$(missing)"
+
+          # A non-zero exit with nothing missing is a REAL failure (login,
+          # timeout, DB) — surface it rather than hiding it behind a warning.
+          if [ "$rc" -ne 0 ] && [ -z "$MISS" ]; then
+            echo "::error::Scrape failed for $JOB_IDS (exit $rc)"
+            exit 1
+          fi
+          if [ -z "$MISS" ]; then
+            echo "✓ scraped and upserted: $JOB_IDS"
             exit 0
           fi
 
-          echo "::notice::$JOB_ID not in the work-items list yet — retrying in 3 minutes"
+          echo "::notice::not in the work-items list yet: $MISS — retrying those in 3 minutes"
           sleep 180
 
-          if npm run watch:email -- --job="$JOB_ID"; then
-            echo "✓ $JOB_ID scraped and upserted on the second attempt"
+          rc=0; scrape "$MISS" || rc=$?
+          MISS2="$(missing)"
+          if [ "$rc" -ne 0 ] && [ -z "$MISS2" ]; then
+            echo "::error::Retry failed for $MISS (exit $rc)"
+            exit 1
+          fi
+          if [ -z "$MISS2" ]; then
+            echo "✓ scraped and upserted on the second attempt: $MISS"
             exit 0
           fi
 
-          # Not a failure worth a red X: the posting is real, Fieldglass just
-          # has not published it yet, and the 30-minute full scrape will collect
-          # it. Failing here would cry wolf on a routine race.
-          echo "::warning::$JOB_ID still not visible in Fieldglass after two attempts — leaving it to the scheduled full scrape (scrape.yml)"
+          # Not a failure worth a red X: the postings are real, Fieldglass just
+          # has not published them yet, and the 30-minute full scrape will
+          # collect them. Failing here would cry wolf on a routine race.
+          echo "::warning::still not visible in Fieldglass after two attempts: $MISS2 — leaving them to the scheduled full scrape (scrape.yml)"
 
       # The whole point of the email trigger is speed, so chunk + embed here
       # too: without this the posting would sit unsearchable until the next
       # scheduled scrape, throwing away the minutes just gained. A no-op when
       # the posting wasn't found (nothing new to chunk).
-      - name: Chunk and embed the new posting
+      # Runs even if the scrape step failed: the spec upserts whatever it got in
+      # a `finally`, so a partial run can still leave new jobs behind — and
+      # skipping chunking would quietly recreate the drift this exists to stop.
+      - name: Chunk and embed the new posting(s)
+        if: success() || failure()
         uses: ./.github/actions/chunk-embed
         with:
           database-url: ${{ secrets.DATABASE_URL }}

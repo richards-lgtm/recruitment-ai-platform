@@ -67,7 +67,10 @@ jobs:
 
       # Chunk + embed immediately, so a newly scraped posting is searchable in
       # the same run rather than waiting for someone to remember `chunk:jobs`.
+      # Runs even on a failed scrape: the spec upserts partial results in a
+      # `finally`, and skipping chunking would quietly recreate the drift.
       - name: Chunk and embed new postings
+        if: success() || failure()
         uses: ./.github/actions/chunk-embed
         with:
           database-url: ${{ secrets.DATABASE_URL }}

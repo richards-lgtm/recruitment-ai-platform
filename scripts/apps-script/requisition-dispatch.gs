@@ -68,6 +68,16 @@ function checkForRequisitions() {
   var doneLabel = getOrCreateLabel(DONE_LABEL);
   var failedLabel = getOrCreateLabel(FAILED_LABEL);
 
+  // ONE dispatch for the whole tick, not one per email. Requisitions do arrive
+  // in clusters, and the workflow shares a concurrency group with the scheduled
+  // scrape — GitHub keeps only one run queued per group, so N simultaneous
+  // dispatches would see most of them CANCELLED, and those postings would fall
+  // back to the 30-minute scrape. Exactly the delay this trigger exists to
+  // avoid, on the busiest mornings. The scrape spec accepts a comma-separated
+  // FIELDGLASS_JOB_IDS and handles them in one browser session.
+  var jobIds = [];      // unique ids, dispatch payload
+  var matched = [];     // threads to label once GitHub accepts
+
   for (var i = 0; i < threads.length; i++) {
     var thread = threads[i];
     var messages = thread.getMessages();
@@ -85,14 +95,25 @@ function checkForRequisitions() {
       continue;
     }
 
-    if (dispatch(token, jobId)) {
-      // Label ONLY after GitHub accepted it, so a failed dispatch is retried on
-      // the next tick rather than lost.
-      thread.addLabel(doneLabel);
-      Logger.log('Dispatched ' + jobId);
-    } else {
-      Logger.log('Dispatch failed for ' + jobId + ' — will retry next run');
-    }
+    // Two emails can reference the same requisition (re-sends, replies): label
+    // both threads, but send the id once.
+    if (jobIds.indexOf(jobId) === -1) jobIds.push(jobId);
+    matched.push(thread);
+  }
+
+  if (jobIds.length === 0) return;
+
+  if (dispatch(token, jobIds.join(','))) {
+    // Label ONLY after GitHub accepted it, so a failed dispatch is retried on
+    // the next tick rather than lost.
+    for (var t = 0; t < matched.length; t++) matched[t].addLabel(doneLabel);
+    Logger.log(
+      'Dispatched ' + jobIds.length + ' requisition(s) in one run: ' + jobIds.join(',')
+    );
+  } else {
+    Logger.log(
+      'Dispatch failed for ' + jobIds.join(',') + ' — nothing labelled, will retry next run'
+    );
   }
 }
 
@@ -104,7 +125,11 @@ function extractJobId(text) {
   return match ? match[1].trim().toUpperCase() : null;
 }
 
-/** POST the repository_dispatch event. Returns true when GitHub accepted it. */
+/**
+ * POST the repository_dispatch event. Returns true when GitHub accepted it.
+ * `jobId` may be a single id or a comma-separated list — the workflow validates
+ * each one before it reaches Playwright.
+ */
 function dispatch(token, jobId) {
   var url = 'https://api.github.com/repos/' + GITHUB_OWNER + '/' + GITHUB_REPO + '/dispatches';
   var response = UrlFetchApp.fetch(url, {
